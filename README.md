@@ -1,4 +1,4 @@
-# Full Stack AI Fianace Platform with Next JS, Supabase, Tailwind, Prisma, Inngest, ArcJet, Shadcn UI Tutorial 🔥🔥
+AI-Based Personal Expense Manager with Predictive Analytics and Smart Budgeting
 
 ### Make sure to create a `.env` file with following variables -
 
