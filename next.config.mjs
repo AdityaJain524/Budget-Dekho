@@ -13,7 +13,7 @@ const nextConfig = {
     serverActions: {
       bodySizeLimit: "5mb",
     },
-    enableTracing: false,
+    
   },
 };
 
