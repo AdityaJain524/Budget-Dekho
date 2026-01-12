@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { CalendarIcon, Loader2 } from "lucide-react";
@@ -40,6 +40,33 @@ export function AddTransactionForm({
   const router = useRouter();
   const searchParams = useSearchParams();
   const editId = searchParams.get("edit");
+  const isProcessingScan = useRef(false);
+
+  const defaultValues = useMemo(() => {
+    return editMode && initialData
+      ? {
+          type: initialData.type,
+          amount: initialData.amount.toString(),
+          description: initialData.description,
+          accountId: initialData.accountId,
+          category: initialData.category,
+          date: new Date(initialData.date),
+          isRecurring: initialData.isRecurring,
+          ...(initialData.recurringInterval && {
+            recurringInterval: initialData.recurringInterval,
+          }),
+        }
+      : {
+          type: "EXPENSE",
+          amount: "",
+          description: "",
+          accountId: accounts.find((ac) => ac.isDefault)?.id || "",
+          category: "",
+          date: new Date(),
+          isRecurring: false,
+          recurringInterval: undefined,
+        };
+  }, [editMode, initialData, accounts]);
 
   const {
     register,
@@ -47,32 +74,10 @@ export function AddTransactionForm({
     formState: { errors },
     watch,
     setValue,
-    getValues,
     reset,
   } = useForm({
     resolver: zodResolver(transactionSchema),
-    defaultValues:
-      editMode && initialData
-        ? {
-            type: initialData.type,
-            amount: initialData.amount.toString(),
-            description: initialData.description,
-            accountId: initialData.accountId,
-            category: initialData.category,
-            date: new Date(initialData.date),
-            isRecurring: initialData.isRecurring,
-            ...(initialData.recurringInterval && {
-              recurringInterval: initialData.recurringInterval,
-            }),
-          }
-        : {
-            type: "EXPENSE",
-            amount: "",
-            description: "",
-            accountId: accounts.find((ac) => ac.isDefault)?.id,
-            date: new Date(),
-            isRecurring: false,
-          },
+    defaultValues,
   });
 
   const {
@@ -95,16 +100,94 @@ export function AddTransactionForm({
   };
 
   const handleScanComplete = (scannedData) => {
-    if (scannedData) {
-      setValue("amount", scannedData.amount.toString());
-      setValue("date", new Date(scannedData.date));
-      if (scannedData.description) {
+    console.log("handleScanComplete called with:", scannedData);
+
+    if (!scannedData || isProcessingScan.current) {
+      console.log("No scanned data received or already processing");
+      return;
+    }
+
+    isProcessingScan.current = true;
+
+    try {
+      // Validate scannedData has required fields
+      if (typeof scannedData !== 'object') {
+        throw new Error("Invalid scanned data format");
+      }
+
+      // Set amount - with multiple safety checks
+      if (scannedData.amount !== undefined && scannedData.amount !== null) {
+        const amount = parseFloat(scannedData.amount);
+        console.log("Processing amount:", amount);
+        
+        if (!isNaN(amount) && amount > 0) {
+          setValue("amount", amount.toString());
+          console.log("✓ Set amount:", amount);
+        } else {
+          console.warn("Invalid amount value:", scannedData.amount);
+          toast.warning("Could not auto-fill amount. Please enter manually.");
+        }
+      } else {
+        console.warn("Amount field missing from scanned data");
+        toast.warning("Could not extract amount from receipt");
+      }
+
+      // Set date
+      if (scannedData.date) {
+        try {
+          const date = new Date(scannedData.date);
+          if (!isNaN(date.getTime())) {
+            setValue("date", date);
+            console.log("✓ Set date:", date);
+          } else {
+            console.warn("Invalid date:", scannedData.date);
+          }
+        } catch (e) {
+          console.error("Date parsing error:", e);
+        }
+      }
+
+      // Set description
+      if (scannedData.description && scannedData.description.trim() !== "") {
         setValue("description", scannedData.description);
+        console.log("✓ Set description:", scannedData.description);
+      } else {
+        console.warn("Description missing or empty");
       }
-      if (scannedData.category) {
-        setValue("category", scannedData.category);
-      }
-      toast.success("Receipt scanned successfully");
+
+      // Always set type to EXPENSE for receipts first
+      setValue("type", "EXPENSE");
+      console.log("✓ Set type: EXPENSE");
+
+      // Set category by matching name after a small delay to ensure type is set
+      setTimeout(() => {
+        if (scannedData.category && scannedData.category.trim() !== "") {
+          const categoryName = scannedData.category.toLowerCase();
+          const foundCategory = categories.find(
+            cat => cat.name.toLowerCase() === categoryName && cat.type === "EXPENSE"
+          );
+          
+          if (foundCategory) {
+            setValue("category", foundCategory.id);
+            console.log(`✓ Set category to: ${foundCategory.name}`);
+          } else {
+            setValue("category", "");
+            console.warn(`Suggested category "${scannedData.category}" not found.`);
+            toast.warning(`Could not match category "${scannedData.category}". Please select manually.`);
+          }
+        } else {
+          setValue("category", "");
+          console.warn("Category field missing or empty from scanned data");
+          toast.warning("Could not extract category from receipt. Please select manually.");
+        }
+        
+        isProcessingScan.current = false;
+      }, 100);
+
+    } catch (error) {
+      console.error("Error in handleScanComplete:", error);
+      toast.error("Error processing receipt data. Please enter manually.");
+      isProcessingScan.current = false;
     }
   };
 
@@ -118,11 +201,20 @@ export function AddTransactionForm({
       reset();
       router.push(`/account/${transactionResult.data.accountId}`);
     }
-  }, [transactionResult, transactionLoading, editMode]);
+  }, [transactionResult, transactionLoading, editMode, reset, router]);
 
   const type = watch("type");
   const isRecurring = watch("isRecurring");
   const date = watch("date");
+  const prevTypeRef = useRef(type);
+
+  // Only clear category when type actually changes (not on mount) and we're not processing a scan
+  useEffect(() => {
+    if (!isProcessingScan.current && prevTypeRef.current !== type && prevTypeRef.current !== undefined) {
+      setValue("category", "");
+    }
+    prevTypeRef.current = type;
+  }, [type, setValue]);
 
   const filteredCategories = categories.filter(
     (category) => category.type === type
@@ -131,14 +223,24 @@ export function AddTransactionForm({
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
       {/* Receipt Scanner - Only show in create mode */}
-      {!editMode && <ReceiptScanner onScanComplete={handleScanComplete} />}
+      {!editMode && (
+        <div className="p-4 bg-gradient-to-br from-orange-50 to-purple-50 rounded-lg border border-purple-200">
+          <h3 className="text-sm font-medium mb-3 text-purple-900">
+            Quick Scan
+          </h3>
+          <ReceiptScanner onScanComplete={handleScanComplete} />
+          <p className="text-xs text-purple-600 mt-2">
+            Upload a receipt photo to auto-fill transaction details with AI
+          </p>
+        </div>
+      )}
 
       {/* Type */}
       <div className="space-y-2">
         <label className="text-sm font-medium">Type</label>
         <Select
           onValueChange={(value) => setValue("type", value)}
-          defaultValue={type}
+          value={watch("type")}
         >
           <SelectTrigger>
             <SelectValue placeholder="Select type" />
@@ -172,7 +274,7 @@ export function AddTransactionForm({
           <label className="text-sm font-medium">Account</label>
           <Select
             onValueChange={(value) => setValue("accountId", value)}
-            defaultValue={getValues("accountId")}
+            value={watch("accountId")}
           >
             <SelectTrigger>
               <SelectValue placeholder="Select account" />
@@ -180,22 +282,19 @@ export function AddTransactionForm({
             <SelectContent>
               {accounts.map((account) => (
                 <SelectItem key={account.id} value={account.id}>
-                  {account.name} (${parseFloat(account.balance).toFixed(2)})
+                  {account.name} (₹{parseFloat(account.balance).toFixed(2)})
                 </SelectItem>
               ))}
-              <CreateAccountDrawer>
-                <Button
-                  variant="ghost"
-                  className="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
-                >
-                  Create Account
-                </Button>
-              </CreateAccountDrawer>
             </SelectContent>
           </Select>
           {errors.accountId && (
             <p className="text-sm text-red-500">{errors.accountId.message}</p>
           )}
+          <CreateAccountDrawer>
+            <Button variant="ghost" className="w-full justify-start">
+              Create New Account
+            </Button>
+          </CreateAccountDrawer>
         </div>
       </div>
 
@@ -204,7 +303,7 @@ export function AddTransactionForm({
         <label className="text-sm font-medium">Category</label>
         <Select
           onValueChange={(value) => setValue("category", value)}
-          defaultValue={getValues("category")}
+          value={watch("category")}
         >
           <SelectTrigger>
             <SelectValue placeholder="Select category" />
@@ -228,6 +327,7 @@ export function AddTransactionForm({
         <Popover>
           <PopoverTrigger asChild>
             <Button
+              type="button"
               variant="outline"
               className={cn(
                 "w-full pl-3 text-left font-normal",
@@ -284,7 +384,7 @@ export function AddTransactionForm({
           <label className="text-sm font-medium">Recurring Interval</label>
           <Select
             onValueChange={(value) => setValue("recurringInterval", value)}
-            defaultValue={getValues("recurringInterval")}
+            value={watch("recurringInterval")}
           >
             <SelectTrigger>
               <SelectValue placeholder="Select interval" />

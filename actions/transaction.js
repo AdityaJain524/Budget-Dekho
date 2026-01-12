@@ -14,6 +14,137 @@ const serializeAmount = (obj) => ({
   amount: obj.amount.toNumber(),
 });
 
+// Scan Receipt Function
+export async function scanReceipt(receiptFile) {
+  try {
+    const { userId } = await auth();
+    if (!userId) throw new Error("Unauthorized");
+
+    if (!receiptFile) {
+      throw new Error("No receipt file provided");
+    }
+
+    console.log("Starting receipt scan...");
+    console.log("File type:", receiptFile.type);
+    console.log("File size:", receiptFile.size);
+
+    // Convert File to base64
+    const arrayBuffer = await receiptFile.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString('base64');
+
+    console.log("Base64 conversion successful");
+
+    // Initialize Gemini model
+    const model = genAI.getGenerativeModel({ 
+      model: "models/gemini-flash-latest",
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.1,
+      }
+    });
+
+    const prompt = `Analyze this receipt image and extract transaction details.
+Return ONLY a valid JSON object in this EXACT format:
+{
+  "amount": 123.45,
+  "description": "Store Name",
+  "date": "YYYY-MM-DD",
+  "category": "Suggested Category Name"
+}
+
+Important:
+- amount: must be a number (total paid amount from the receipt)
+- description: store/merchant name
+- date: YYYY-MM-DD format (if not visible on receipt, use today's date)
+- category: Suggest a single, general category for the items on the receipt (e.g., "Groceries", "Food", "Shopping").
+
+Return ONLY the JSON object, no markdown, no explanations, no extra text.`;
+
+    console.log("Calling Gemini API...");
+
+    const result = await model.generateContent([
+      {
+        text: prompt
+      },
+      {
+        inlineData: {
+          data: base64Data,
+          mimeType: receiptFile.type || "image/jpeg"
+        }
+      }
+    ]);
+
+    const response = await result.response;
+    let responseText = response.text();
+    
+    console.log("Raw Gemini response:", responseText);
+    
+    // Clean up markdown formatting
+    responseText = responseText
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .replace(/^`+|`+$/g, '')
+      .trim();
+    
+    console.log("Cleaned response:", responseText);
+    
+    // Parse JSON
+    let parsedData;
+    try {
+      parsedData = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error("JSON parse error:", parseError);
+      console.error("Failed to parse:", responseText);
+      throw new Error("Invalid response from AI. Please try again.");
+    }
+    
+    console.log("Parsed data:", parsedData);
+    
+    // Validate and normalize data
+    if (!parsedData.amount || parsedData.amount <= 0) {
+      throw new Error("Could not extract amount from receipt");
+    }
+
+    // Ensure amount is a number
+    parsedData.amount = parseFloat(parsedData.amount);
+    
+    if (isNaN(parsedData.amount)) {
+      throw new Error("Invalid amount in receipt");
+    }
+    
+    // Set default date if not provided or invalid
+    if (!parsedData.date || parsedData.date === "") {
+      parsedData.date = new Date().toISOString().split('T')[0];
+    }
+
+    // Validate date format
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(parsedData.date)) {
+      parsedData.date = new Date().toISOString().split('T')[0];
+    }
+
+    // Set default description if empty
+    if (!parsedData.description || parsedData.description === "") {
+      parsedData.description = "Receipt Transaction";
+    }
+
+    // Category will be a suggested name, or empty string
+    parsedData.category = parsedData.category || "";
+    
+    console.log("Final processed data:", parsedData);
+    
+    return { 
+      success: true, 
+      data: parsedData 
+    };
+    
+  } catch (error) {
+    console.error("Error scanning receipt:", error);
+    console.error("Error stack:", error.stack);
+    throw new Error(`Failed to scan receipt: ${error.message}`);
+  }
+}
+
 // Create Transaction
 export async function createTransaction(data) {
   try {
@@ -26,7 +157,7 @@ export async function createTransaction(data) {
     // Check rate limit
     const decision = await aj.protect(req, {
       userId,
-      requested: 1, // Specify how many tokens to consume
+      requested: 1,
     });
 
     if (decision.isDenied()) {
@@ -95,32 +226,40 @@ export async function createTransaction(data) {
 
     return { success: true, data: serializeAmount(transaction) };
   } catch (error) {
+    console.error("Error creating transaction:", error);
     throw new Error(error.message);
   }
 }
 
+// Get Transaction
 export async function getTransaction(id) {
-  const { userId } = await auth();
-  if (!userId) throw new Error("Unauthorized");
+  try {
+    const { userId } = await auth();
+    if (!userId) throw new Error("Unauthorized");
 
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
-  });
+    const user = await db.user.findUnique({
+      where: { clerkUserId: userId },
+    });
 
-  if (!user) throw new Error("User not found");
+    if (!user) throw new Error("User not found");
 
-  const transaction = await db.transaction.findUnique({
-    where: {
-      id,
-      userId: user.id,
-    },
-  });
+    const transaction = await db.transaction.findUnique({
+      where: {
+        id,
+        userId: user.id,
+      },
+    });
 
-  if (!transaction) throw new Error("Transaction not found");
+    if (!transaction) throw new Error("Transaction not found");
 
-  return serializeAmount(transaction);
+    return serializeAmount(transaction);
+  } catch (error) {
+    console.error("Error getting transaction:", error);
+    throw new Error(error.message);
+  }
 }
 
+// Update Transaction
 export async function updateTransaction(id, data) {
   try {
     const { userId } = await auth();
@@ -190,6 +329,7 @@ export async function updateTransaction(id, data) {
 
     return { success: true, data: serializeAmount(transaction) };
   } catch (error) {
+    console.error("Error updating transaction:", error);
     throw new Error(error.message);
   }
 }
@@ -223,70 +363,8 @@ export async function getUserTransactions(query = {}) {
 
     return { success: true, data: transactions };
   } catch (error) {
+    console.error("Error getting transactions:", error);
     throw new Error(error.message);
-  }
-}
-
-// Scan Receipt
-export async function scanReceipt(file) {
-  try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    // Convert File to ArrayBuffer
-    const arrayBuffer = await file.arrayBuffer();
-    // Convert ArrayBuffer to Base64
-    const base64String = Buffer.from(arrayBuffer).toString("base64");
-
-    const prompt = `
-      Analyze this receipt image and extract the following information in JSON format:
-      - Total amount (just the number)
-      - Date (in ISO format)
-      - Description or items purchased (brief summary)
-      - Merchant/store name
-      - Suggested category (one of: housing,transportation,groceries,utilities,entertainment,food,shopping,healthcare,education,personal,travel,insurance,gifts,bills,other-expense )
-      
-      Only respond with valid JSON in this exact format:
-      {
-        "amount": number,
-        "date": "ISO date string",
-        "description": "string",
-        "merchantName": "string",
-        "category": "string"
-      }
-
-      If its not a recipt, return an empty object
-    `;
-
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          data: base64String,
-          mimeType: file.type,
-        },
-      },
-      prompt,
-    ]);
-
-    const response = await result.response;
-    const text = response.text();
-    const cleanedText = text.replace(/```(?:json)?\n?/g, "").trim();
-
-    try {
-      const data = JSON.parse(cleanedText);
-      return {
-        amount: parseFloat(data.amount),
-        date: new Date(data.date),
-        description: data.description,
-        category: data.category,
-        merchantName: data.merchantName,
-      };
-    } catch (parseError) {
-      console.error("Error parsing JSON response:", parseError);
-      throw new Error("Invalid response format from Gemini");
-    }
-  } catch (error) {
-    console.error("Error scanning receipt:", error);
-    throw new Error("Failed to scan receipt");
   }
 }
 
