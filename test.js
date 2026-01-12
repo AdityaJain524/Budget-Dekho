@@ -6,7 +6,7 @@ dotenv.config();
 async function listAvailableModels() {
   try {
     // Check if API key exists
-    const apiKey = 'AIzaSyC70bAYu-K0v_DPCBI0TXDQUMjLjkjO0TQ'; // Replace with your actual API key';
+    const apiKey = ''; // Replace with your actual API key';
     console.log('API Key loaded:', !!apiKey);
     console.log('API Key prefix:', apiKey?.substring(0, 10));
     
